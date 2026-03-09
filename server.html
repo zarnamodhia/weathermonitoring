@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<title>ESP32 Smart Weather Station</title>
+
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600&family=Poppins:wght@300;500&display=swap" rel="stylesheet">
+
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDDVgK_2G3R8v9pbdCJCHAHYefJhU_Q0v8"></script>
+
+<style>
+
+*{box-sizing:border-box}
+
+body{
+margin:0;
+font-family:Poppins;
+color:white;
+background:linear-gradient(270deg,#0f2027,#203a43,#2c5364);
+background-size:600% 600%;
+animation:bgMove 15s ease infinite;
+text-align:center;
+overflow-x:hidden;
+}
+
+@keyframes bgMove{
+0%{background-position:0% 50%}
+50%{background-position:100% 50%}
+100%{background-position:0% 50%}
+}
+
+h1{
+font-family:Orbitron;
+margin-top:30px;
+letter-spacing:3px;
+}
+
+.container{
+display:flex;
+justify-content:center;
+flex-wrap:wrap;
+gap:25px;
+margin-top:40px;
+}
+
+.card{
+width:240px;
+padding:30px;
+border-radius:20px;
+background:rgba(255,255,255,0.1);
+backdrop-filter:blur(10px);
+box-shadow:0 10px 40px rgba(0,0,0,0.4);
+transition:.3s;
+}
+
+.card:hover{
+transform:scale(1.05);
+}
+
+.icon{
+font-size:45px;
+}
+
+.value{
+font-size:40px;
+font-weight:600;
+}
+
+.label{
+opacity:.8;
+}
+
+.rainAlert{
+animation:pulse 1s infinite;
+box-shadow:0 0 25px #4fc3f7;
+}
+
+@keyframes pulse{
+0%{transform:scale(1)}
+50%{transform:scale(1.1)}
+100%{transform:scale(1)}
+}
+
+/* Lightning */
+
+.flash{
+position:fixed;
+top:0;
+left:0;
+width:100%;
+height:100%;
+background:white;
+opacity:0;
+pointer-events:none;
+}
+
+.flash.active{
+animation:lightning .3s;
+}
+
+@keyframes lightning{
+0%{opacity:0}
+30%{opacity:.8}
+100%{opacity:0}
+}
+
+/* Clouds */
+
+.cloud{
+position:absolute;
+top:80px;
+font-size:60px;
+opacity:.3;
+animation:cloudMove 60s linear infinite;
+}
+
+@keyframes cloudMove{
+0%{transform:translateX(-200px)}
+100%{transform:translateX(120vw)}
+}
+
+/* Notification */
+
+.notification{
+position:fixed;
+top:20px;
+right:-400px;
+background:#ff5252;
+padding:15px 25px;
+border-radius:10px;
+font-weight:500;
+transition:.5s;
+}
+
+.notification.show{
+right:20px;
+}
+
+/* Charts */
+
+.chartSection{
+width:80%;
+margin:auto;
+margin-top:60px;
+}
+
+canvas{
+background:rgba(255,255,255,0.05);
+border-radius:15px;
+padding:20px;
+}
+
+/* Map */
+
+.mapSection{
+margin-top:60px;
+}
+
+#map{
+width:80%;
+height:400px;
+margin:auto;
+border-radius:20px;
+box-shadow:0 10px 30px rgba(0,0,0,0.4);
+}
+
+.status{
+margin-top:20px;
+opacity:.7;
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="flash" id="flash"></div>
+<div class="cloud">☁️</div>
+
+<h1>🌦 ESP32 WEATHER STATION</h1>
+
+<div class="container">
+
+<div class="card">
+<div id="tempIcon" class="icon">🌡️</div>
+<div class="label">Temperature</div>
+<div id="temp" class="value">--</div>
+<div id="comfort"></div>
+</div>
+
+<div class="card">
+<div id="humIcon" class="icon">💧</div>
+<div class="label">Humidity</div>
+<div id="hum" class="value">--</div>
+</div>
+
+<div class="card" id="rainCard">
+<div class="icon">🌧</div>
+<div class="label">Rain</div>
+<div id="rain" class="value">--</div>
+</div>
+
+</div>
+
+<div class="status">
+ESP32 Status: <span id="conn">Checking...</span> |
+Last Update: <span id="time">--</span>
+</div>
+
+<div class="chartSection">
+<h2>📊 Weather Trends</h2>
+<canvas id="tempChart"></canvas>
+<br><br>
+<canvas id="humChart"></canvas>
+</div>
+
+<div class="mapSection">
+<h2>📍 Weather Station Location</h2>
+<div id="map"></div>
+</div>
+
+<div class="notification" id="notify">
+⚠️ Rain Detected!
+</div>
+
+<audio id="rainSound">
+<source src="https://cdn.pixabay.com/download/audio/2022/03/15/audio_6f4b8b34d0.mp3">
+</audio>
+
+<audio id="alertSound">
+<source src="https://cdn.pixabay.com/download/audio/2022/02/23/audio_7c1b7dbd91.mp3">
+</audio>
+
+<script>
+
+/* Firebase */
+
+var firebaseConfig={
+apiKey:"AIzaSyCd2mUtd9bf3A8kRfDzUEMT-kS3ul7pE_k",
+databaseURL:"https://weather-monitoring-e6913-default-rtdb.firebaseio.com/"
+};
+
+firebase.initializeApp(firebaseConfig);
+
+var db=firebase.database();
+
+/* Charts */
+
+var tempData=[];
+var humData=[];
+var labels=[];
+
+var tempChart=new Chart(document.getElementById("tempChart"),{
+type:"line",
+data:{
+labels:labels,
+datasets:[{
+label:"Temperature °C",
+data:tempData,
+borderColor:"red",
+fill:false
+}]
+}
+});
+
+var humChart=new Chart(document.getElementById("humChart"),{
+type:"line",
+data:{
+labels:labels,
+datasets:[{
+label:"Humidity %",
+data:humData,
+borderColor:"cyan",
+fill:false
+}]
+}
+});
+
+/* Timestamp */
+
+function updateTime(){
+
+let now=new Date();
+document.getElementById("time").innerHTML=now.toLocaleTimeString();
+
+}
+
+/* Temperature */
+
+db.ref("weather/temperature").on("value",function(s){
+
+let t=s.val();
+
+temp.innerHTML=t+" °C";
+
+updateTime();
+
+labels.push("");
+tempData.push(t);
+
+if(labels.length>20){
+labels.shift();
+tempData.shift();
+}
+
+tempChart.update();
+
+if(t<18){
+tempIcon.innerHTML="🥶";
+comfort.innerHTML="Cold";
+}
+else if(t<30){
+tempIcon.innerHTML="😊";
+comfort.innerHTML="Comfortable";
+}
+else{
+tempIcon.innerHTML="🥵";
+comfort.innerHTML="Too Hot";
+}
+
+});
+
+/* Humidity */
+
+db.ref("weather/humidity").on("value",function(s){
+
+let h=s.val();
+
+hum.innerHTML=h+" %";
+
+labels.push("");
+humData.push(h);
+
+if(humData.length>20){
+humData.shift();
+}
+
+humChart.update();
+
+if(h<30) humIcon.innerHTML="🏜️";
+else if(h<70) humIcon.innerHTML="💧";
+else humIcon.innerHTML="🌊";
+
+});
+
+/* Rain */
+
+db.ref("weather/rain").on("value",function(s){
+
+let r=s.val();
+
+if(r==0){
+
+rain.innerHTML="RAINING";
+rainCard.classList.add("rainAlert");
+
+rainSound.play();
+alertSound.play();
+
+showNotification();
+lightning();
+
+}
+else{
+
+rain.innerHTML="CLEAR";
+rainCard.classList.remove("rainAlert");
+
+rainSound.pause();
+
+}
+
+});
+
+/* ESP32 status */
+
+db.ref("weather/lastSeen").on("value",function(s){
+
+let last=s.val();
+let now=Math.floor(Date.now()/1000);
+
+if(now-last<15){
+
+conn.innerHTML="Online 🟢";
+
+}else{
+
+conn.innerHTML="Offline 🔴";
+
+}
+
+});
+
+/* Lightning */
+
+function lightning(){
+
+let flash=document.getElementById("flash");
+
+flash.classList.add("active");
+
+setTimeout(()=>{
+flash.classList.remove("active");
+},300);
+
+}
+
+/* Notification */
+
+function showNotification(){
+
+let n=document.getElementById("notify");
+
+n.classList.add("show");
+
+setTimeout(()=>{
+n.classList.remove("show");
+},4000);
+
+}
+
+/* Map */
+
+function initMap(){
+
+var station={lat:23.0225,lng:72.5714};
+
+var map=new google.maps.Map(document.getElementById("map"),{
+zoom:12,
+center:station
+});
+
+var marker=new google.maps.Marker({
+position:station,
+map:map,
+title:"ESP32 Weather Station"
+});
+
+var info=new google.maps.InfoWindow({
+content:"<h3>ESP32 Weather Station</h3>"
+});
+
+marker.addListener("click",function(){
+info.open(map,marker);
+});
+
+}
+
+initMap();
+
+</script>
+
+</body>
+</html>
